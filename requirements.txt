@@ -1,0 +1,6 @@
+python-telegram-bot[job-queue]>=21
+httpx
+trafilatura
+python-dotenv
+pypdf
+PyYAML

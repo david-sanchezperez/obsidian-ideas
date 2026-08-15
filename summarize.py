@@ -1,0 +1,117 @@
+"""Extracción de contenido de URLs y resumen vía DeepSeek."""
+import io
+import json
+import os
+import re
+from urllib.parse import urlparse
+
+import httpx
+import trafilatura
+from pypdf import PdfReader
+
+URL_RE = re.compile(r"https?://\S+")
+X_HOSTS = {"x.com", "twitter.com", "www.x.com", "www.twitter.com"}
+TAG_RE = re.compile(r"<[^>]+>")
+
+DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+
+PROMPT = """Eres un asistente que resume noticias, artículos o ideas para un almacén \
+personal de ideas en Obsidian. Te doy un texto (o una idea suelta). Devuelve SOLO un \
+JSON con esta forma exacta, sin markdown ni explicación:
+{{"title": "título corto", "summary": "resumen en 3-5 frases en castellano", \
+"tags": ["tag1", "tag2"]}}
+
+Texto:
+{text}
+"""
+
+
+def extract_url(message: str) -> str | None:
+    match = URL_RE.search(message)
+    return match.group(0) if match else None
+
+
+def fetch_tweet_text(url: str) -> str | None:
+    """X no sirve HTML renderizado (contenido vía JS); usamos su oEmbed público."""
+    resp = httpx.get(
+        "https://publish.twitter.com/oembed",
+        params={"url": url, "omit_script": "true"},
+        timeout=15,
+        follow_redirects=True,
+    )
+    if resp.status_code != 200:
+        return None
+    html = resp.json().get("html", "")
+    return TAG_RE.sub(" ", html).strip() or None
+
+
+def fetch_url_bytes(url: str) -> bytes | None:
+    resp = httpx.get(url, timeout=30, follow_redirects=True)
+    return resp.content if resp.status_code == 200 else None
+
+
+def summarize(text: str) -> dict:
+    api_key = os.environ["DEEPSEEK_API_KEY"]
+    resp = httpx.post(
+        DEEPSEEK_URL,
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": PROMPT.format(text=text[:8000])}],
+            "response_format": {"type": "json_object"},
+        },
+        timeout=60,
+    )
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
+    return json.loads(content)
+
+
+def extract_pdf_text(data: bytes) -> str:
+    reader = PdfReader(io.BytesIO(data))
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
+def process_pdf(data: bytes, filename: str) -> dict:
+    """Devuelve {"title", "summary", "tags", "source_url"} a partir de un PDF."""
+    text = extract_pdf_text(data)
+    if not text.strip():
+        return {
+            "title": filename,
+            "summary": "No se pudo extraer texto de este PDF (¿es un escaneo sin OCR?).",
+            "tags": [],
+            "source_url": None,
+        }
+    result = summarize(text)
+    result["source_url"] = None
+    return result
+
+
+def process_message(message: str) -> dict:
+    """Devuelve {"title", "summary", "tags", "source_url"} listo para guardar."""
+    url = extract_url(message)
+    if not url:
+        result = summarize(message)
+        result["source_url"] = None
+        return result
+
+    if urlparse(url).netloc in X_HOSTS:
+        content = fetch_tweet_text(url)
+    else:
+        data = fetch_url_bytes(url)
+        if data and data[:4] == b"%PDF":
+            result = process_pdf(data, url.rstrip("/").rsplit("/", 1)[-1] or "documento.pdf")
+            result["source_url"] = url
+            return result
+        content = trafilatura.extract(data.decode("utf-8", "ignore")) if data else None
+
+    if not content:
+        return {
+            "title": url,
+            "summary": "No se pudo extraer el contenido de este enlace automáticamente.",
+            "tags": [],
+            "source_url": url,
+        }
+    result = summarize(content)
+    result["source_url"] = url
+    return result
