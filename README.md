@@ -9,7 +9,7 @@ A Telegram bot that turns links and half-formed ideas into searchable Obsidian n
 ## What it does
 
 1. **Capture** — paste a link or a thought into the bot. It fetches/summarizes it (via an LLM) and saves it as a Markdown note in your Obsidian vault, tagged.
-2. **Search** — `/buscar <term>` searches your saved notes.
+2. **Search** — `/buscar <term>` full-text searches your saved notes; `/tag <name>` lists notes carrying a given tag.
 3. **Match** — each note is checked against a list of your active projects (built from their `README.md`, plus an optional `AGENTS.md` capability block — see below). If there's a concrete fit, you get a one-line explanation in Telegram.
 4. **Dispatch** — if the project declares a matching capability, the bot opens an autonomous task against an orchestrator API (any service implementing the small contract below — [agent-loops](https://github.com/danifernandezs/agent-loops)-shaped, but not tied to it). If the orchestrator is unreachable (e.g. your machine is off), the note is queued and retried on a weekly digest.
 

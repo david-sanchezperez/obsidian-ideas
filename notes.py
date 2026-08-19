@@ -7,6 +7,14 @@ from pathlib import Path
 VAULT_DIR = Path(__file__).parent / "vault"
 
 DISPATCH_RE = re.compile(r"\n?<!-- dispatch: (.*) -->\n?$")
+TAGS_LINE_RE = re.compile(r"^tags: \[(.*)\]$", re.MULTILINE)
+
+
+def read_tags(path: Path) -> list[str]:
+    match = TAGS_LINE_RE.search(path.read_text(encoding="utf-8"))
+    if not match or not match.group(1).strip():
+        return []
+    return [t.strip() for t in match.group(1).split(",")]
 
 
 def slugify(text: str, max_len: int = 60) -> str:

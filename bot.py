@@ -8,9 +8,9 @@ from telegram import Bot, Update
 from telegram.ext import Application, ContextTypes, MessageHandler, CommandHandler, filters
 
 from dispatch import dispatch_task, retry_pending
-from notes import VAULT_DIR, save_note, write_dispatch
+from notes import VAULT_DIR, read_tags, save_note, write_dispatch
 from review import evaluate_fit, load_notes, load_repos, review
-from summarize import process_message, process_pdf
+from summarize import ALLOWED_TAGS, process_message, process_pdf
 
 load_dotenv()
 
@@ -103,6 +103,23 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Sin resultados.")
 
 
+async def tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        return
+    query = " ".join(context.args)
+    if not query:
+        await update.message.reply_text("Uso: /tag <nombre>\nTags disponibles: " + ", ".join(ALLOWED_TAGS))
+        return
+    if query not in ALLOWED_TAGS:
+        await update.message.reply_text(f"Tag desconocido. Disponibles: {', '.join(ALLOWED_TAGS)}")
+        return
+    matches = [note.name for note in VAULT_DIR.glob("*.md") if query in read_tags(note)]
+    if matches:
+        await update.message.reply_text(f"Notas con #{query}:\n" + "\n".join(sorted(matches)[:20]))
+    else:
+        await update.message.reply_text(f"Sin notas con #{query}.")
+
+
 async def _send_review(bot: Bot, chat_id: int) -> None:
     notes = load_notes(VAULT_DIR)
     if not notes:
@@ -148,6 +165,7 @@ def main() -> None:
     token = os.environ["TELEGRAM_TOKEN"]
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("buscar", buscar))
+    app.add_handler(CommandHandler("tag", tag))
     app.add_handler(CommandHandler("revisar", revisar))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

@@ -9,7 +9,7 @@ Un bot de Telegram que convierte enlaces e ideas sueltas en notas de Obsidian bu
 ## Qué hace
 
 1. **Captura** — pega un enlace o una idea en el bot. La resume (vía LLM) y la guarda como nota Markdown en tu vault de Obsidian, etiquetada.
-2. **Búsqueda** — `/buscar <término>` busca en tus notas guardadas.
+2. **Búsqueda** — `/buscar <término>` busca texto libre en tus notas guardadas; `/tag <nombre>` lista las notas con un tag concreto.
 3. **Encaje** — cada nota se compara contra la lista de tus proyectos activos (construida a partir de su `README.md`, más un bloque opcional de capacidades en `AGENTS.md` — ver más abajo). Si hay un encaje concreto, recibes una explicación de una línea en Telegram.
 4. **Despacho** — si el proyecto declara una capacidad que encaja, el bot abre una tarea autónoma contra una API de orquestador (con la forma de [agent-loops](https://github.com/danifernandezs/agent-loops), pero no atada a él). Si el orquestador no responde (p. ej. tu equipo está apagado), la nota se encola y se reintenta en un digest semanal.
 

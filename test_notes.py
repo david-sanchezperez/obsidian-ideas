@@ -1,7 +1,7 @@
 """Self-check mínimo: generación de notas y slugs."""
 from pathlib import Path
 
-from notes import build_note, read_dispatch, slugify, write_dispatch
+from notes import build_note, read_dispatch, read_tags, slugify, write_dispatch
 
 
 def test_slugify():
@@ -20,6 +20,16 @@ def test_build_note_without_source():
     md = build_note("Idea suelta", "Resumen breve.", [], None)
     assert "source:" not in md
     assert "Idea suelta" in md
+
+
+def test_read_tags(tmp_path: Path):
+    path = tmp_path / "nota.md"
+    path.write_text(build_note("T", "Resumen.", ["ia", "memoria"], None), encoding="utf-8")
+    assert read_tags(path) == ["ia", "memoria"]
+
+    path_no_tags = tmp_path / "sin-tags.md"
+    path_no_tags.write_text(build_note("T2", "Resumen.", [], None), encoding="utf-8")
+    assert read_tags(path_no_tags) == []
 
 
 def test_dispatch_roundtrip(tmp_path: Path):
@@ -43,6 +53,8 @@ if __name__ == "__main__":
     test_slugify()
     test_build_note_with_source()
     test_build_note_without_source()
+    with tempfile.TemporaryDirectory() as d:
+        test_read_tags(Path(d))
     with tempfile.TemporaryDirectory() as d:
         test_dispatch_roundtrip(Path(d))
     print("OK")
