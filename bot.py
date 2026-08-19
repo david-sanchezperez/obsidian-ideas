@@ -15,6 +15,10 @@ from summarize import process_message, process_pdf
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
+# httpx loguea la URL completa de cada petición a INFO, y la API de Telegram
+# lleva el token del bot embebido en la URL (/bot<TOKEN>/metodo) — sin esto,
+# cada reinicio filtra el token en los logs del contenedor.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 ALLOWED_USERS = {int(u) for u in os.environ.get("TELEGRAM_ALLOWED_USERS", "").split(",") if u}
@@ -27,6 +31,8 @@ def _authorized(update: Update) -> bool:
 async def _save_and_reply(update: Update, result: dict) -> None:
     path = save_note(result["title"], result["summary"], result["tags"], result["source_url"])
     reply = f"Guardado: {path.name}\n\n{result['summary']}"
+    if result["tags"]:
+        reply += "\n\n🏷️ " + ", ".join(result["tags"])
     try:
         repos = load_repos()
         fit = evaluate_fit(path.read_text(encoding="utf-8"), repos)

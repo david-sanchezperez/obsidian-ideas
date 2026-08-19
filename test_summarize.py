@@ -3,7 +3,7 @@ import io
 
 from pypdf import PdfWriter
 
-from summarize import process_pdf
+from summarize import extract_manual_tags, process_pdf
 
 
 def test_process_pdf_empty_text():
@@ -17,6 +17,13 @@ def test_process_pdf_empty_text():
     assert result["summary"]
 
 
+def test_extract_manual_tags():
+    assert extract_manual_tags("interesante artículo #learning #todo") == ["todo", "learning"]
+    assert extract_manual_tags("sin tags aquí") == []
+    assert extract_manual_tags("#no-existe #learning") == ["learning"]
+
+
 if __name__ == "__main__":
     test_process_pdf_empty_text()
+    test_extract_manual_tags()
     print("OK")

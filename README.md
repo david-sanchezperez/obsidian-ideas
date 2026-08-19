@@ -21,6 +21,15 @@ cp .env.example .env
 docker compose up -d
 ```
 
+## Tags
+
+Every note gets 1-3 tags from a closed vocabulary (`ALLOWED_TAGS` in `summarize.py`) —
+the LLM picks from it, it never invents new ones. Edit that list to fit your own topics.
+
+You can also force a tag yourself by putting a `#hashtag` in the message you send the
+bot (must match a tag in the list, e.g. `#learning`, `#todo`) — it gets added on top of
+whatever the LLM picked, and shown back to you in the bot's reply.
+
 ## Declaring what a project can do
 
 Drop an `AGENTS.md` in any of your repos with a fenced `capabilities` block:

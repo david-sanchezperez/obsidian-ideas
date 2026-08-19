@@ -10,20 +10,44 @@ import trafilatura
 from pypdf import PdfReader
 
 URL_RE = re.compile(r"https?://\S+")
+HASHTAG_RE = re.compile(r"#(\w[\w-]*)")
 X_HOSTS = {"x.com", "twitter.com", "www.x.com", "www.twitter.com"}
 TAG_RE = re.compile(r"<[^>]+>")
 
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 
+# Vocabulario cerrado de tags. Añadir aquí para ampliarlo — el LLM y los
+# hashtags manuales del mensaje solo pueden usar valores de esta lista.
+ALLOWED_TAGS = [
+    "agentes-ia",
+    "modelos-llm",
+    "infraestructura-local",
+    "seguridad-gobernanza",
+    "investigacion",
+    "arquitectura-multimodelo",
+    "second-brain",
+    "otros",
+    "todo",
+    "learning",
+]
+
 PROMPT = """Eres un asistente que resume noticias, artículos o ideas para un almacén \
-personal de ideas en Obsidian. Te doy un texto (o una idea suelta). Devuelve SOLO un \
-JSON con esta forma exacta, sin markdown ni explicación:
+personal de ideas en Obsidian. Te doy un texto (o una idea suelta). Elige entre 1 y 3 \
+tags SOLO de esta lista cerrada (no inventes otros): {allowed_tags}
+
+Devuelve SOLO un JSON con esta forma exacta, sin markdown ni explicación:
 {{"title": "título corto", "summary": "resumen en 3-5 frases en castellano", \
-"tags": ["tag1", "tag2"]}}
+"tags": ["tag-de-la-lista"]}}
 
 Texto:
 {text}
 """
+
+
+def extract_manual_tags(message: str) -> list[str]:
+    """Hashtags que el usuario escribe a mano en el mensaje, filtrados al vocabulario cerrado."""
+    found = {m.lower() for m in HASHTAG_RE.findall(message)}
+    return [t for t in ALLOWED_TAGS if t in found]
 
 
 def extract_url(message: str) -> str | None:
@@ -57,14 +81,19 @@ def summarize(text: str) -> dict:
         headers={"Authorization": f"Bearer {api_key}"},
         json={
             "model": "deepseek-chat",
-            "messages": [{"role": "user", "content": PROMPT.format(text=text[:8000])}],
+            "messages": [{
+                "role": "user",
+                "content": PROMPT.format(allowed_tags=", ".join(ALLOWED_TAGS), text=text[:8000]),
+            }],
             "response_format": {"type": "json_object"},
         },
         timeout=60,
     )
     resp.raise_for_status()
     content = resp.json()["choices"][0]["message"]["content"]
-    return json.loads(content)
+    result = json.loads(content)
+    result["tags"] = [t for t in result.get("tags", []) if t in ALLOWED_TAGS]
+    return result
 
 
 def extract_pdf_text(data: bytes) -> str:
@@ -89,10 +118,12 @@ def process_pdf(data: bytes, filename: str) -> dict:
 
 def process_message(message: str) -> dict:
     """Devuelve {"title", "summary", "tags", "source_url"} listo para guardar."""
+    manual_tags = extract_manual_tags(message)
     url = extract_url(message)
     if not url:
         result = summarize(message)
         result["source_url"] = None
+        result["tags"] = list(dict.fromkeys(result["tags"] + manual_tags))
         return result
 
     if urlparse(url).netloc in X_HOSTS:
@@ -102,6 +133,7 @@ def process_message(message: str) -> dict:
         if data and data[:4] == b"%PDF":
             result = process_pdf(data, url.rstrip("/").rsplit("/", 1)[-1] or "documento.pdf")
             result["source_url"] = url
+            result["tags"] = list(dict.fromkeys(result["tags"] + manual_tags))
             return result
         content = trafilatura.extract(data.decode("utf-8", "ignore")) if data else None
 
@@ -109,9 +141,10 @@ def process_message(message: str) -> dict:
         return {
             "title": url,
             "summary": "No se pudo extraer el contenido de este enlace automáticamente.",
-            "tags": [],
+            "tags": manual_tags,
             "source_url": url,
         }
     result = summarize(content)
     result["source_url"] = url
+    result["tags"] = list(dict.fromkeys(result["tags"] + manual_tags))
     return result
