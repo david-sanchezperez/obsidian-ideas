@@ -7,8 +7,8 @@ from dotenv import load_dotenv
 from telegram import Bot, Update
 from telegram.ext import Application, ContextTypes, MessageHandler, CommandHandler, filters
 
-from dispatch import dispatch_task, retry_pending
-from notes import VAULT_DIR, read_tags, save_note, write_dispatch
+from dispatch import dispatch_task, retry_pending, sync_dispatch_statuses
+from notes import VAULT_DIR, read_dispatch, read_tags, save_note, write_dispatch
 from review import evaluate_fit, load_notes, load_repos, review
 from summarize import ALLOWED_TAGS, process_message, process_pdf
 
@@ -39,9 +39,12 @@ async def _save_and_reply(update: Update, result: dict) -> None:
         if fit:
             reply += f"\n\n📌 {fit['telegram_note']}"
             try:
-                dispatch_task(fit, repos[fit["project_slug"]])
-                reply += f"\n🤖 Tarea encolada en agent-loops ({fit['project_slug']}, rama)."
-                write_dispatch(path, "dispatched", fit)
+                task = dispatch_task(fit, repos[fit["project_slug"]])
+                reply += (
+                    f"\n🤖 Tarea encolada en agent-loops ({fit['project_slug']}). "
+                    f"Estado: {task.get('status', 'triage')}. Usa /tareas para ver el progreso."
+                )
+                write_dispatch(path, "dispatched", fit, task)
             except Exception:
                 log.exception("Error encolando tarea en agent-loops")
                 reply += "\n⚠️ No se ha podido encolar ahora (¿PC apagado?). Se reintentará en el digest semanal."
@@ -143,6 +146,65 @@ async def revisar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("No he podido revisar las notas. Revisa los logs.")
 
 
+STATUS_LABELS = {
+    "triage": "🕒 en cola (aún sin decidir cómo trocearla)",
+    "todo": "🕒 en cola",
+    "ready": "🕒 lista para que un agente la coja",
+    "running": "⚙️ trabajándose ahora mismo",
+    "blocked": "🚧 bloqueada, necesita revisión",
+    "done": "✅ terminada",
+    "archived": "✅ terminada (archivada)",
+    "gave_up": "❌ abandonada tras varios intentos",
+}
+
+
+async def tareas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        return
+    dispatched = []
+    for note in VAULT_DIR.glob("*.md"):
+        fit = read_dispatch(note)
+        if fit and fit.get("status") == "dispatched" and fit.get("task_id"):
+            dispatched.append(fit)
+    if not dispatched:
+        await update.message.reply_text("No hay ninguna idea trabajándose ahora mismo.")
+        return
+    await update.message.reply_text("Consultando agent-loops...")
+    try:
+        sync_dispatch_statuses(VAULT_DIR)  # refresca antes de listar
+    except Exception:
+        log.exception("Error sincronizando estado de tareas para /tareas")
+    lines = []
+    for note in VAULT_DIR.glob("*.md"):
+        fit = read_dispatch(note)
+        if not fit or fit.get("status") != "dispatched" or not fit.get("task_id"):
+            continue
+        label = STATUS_LABELS.get(fit.get("agent_loops_status"), fit.get("agent_loops_status", "?"))
+        lines.append(f"• {fit['task_title']} ({fit['project_slug']}) — {label}")
+    await update.message.reply_text("\n".join(lines) if lines else "No hay ninguna idea trabajándose ahora mismo.")
+
+
+async def sync_tasks(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Job periódico: si alguna tarea despachada llegó a un estado terminal
+    (done/archived/blocked/gave_up), avisa por Telegram — es el único punto
+    en que te enteras sin tener que preguntar tú con /tareas."""
+    try:
+        changed = sync_dispatch_statuses(VAULT_DIR)
+    except Exception:
+        log.exception("Error en el sync periódico de tareas")
+        return
+    if not changed:
+        return
+    for item in changed:
+        label = STATUS_LABELS.get(item["status"], item["status"])
+        text = f"{label}\n{item['task_title']} ({item['project_slug']})"
+        for user_id in ALLOWED_USERS:
+            try:
+                await context.bot.send_message(chat_id=user_id, text=text)
+            except Exception:
+                log.exception("Error notificando cambio de estado a %s", user_id)
+
+
 async def digest_semanal(context: ContextTypes.DEFAULT_TYPE) -> None:
     attempted = ok = 0
     try:
@@ -167,11 +229,14 @@ def main() -> None:
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CommandHandler("tag", tag))
     app.add_handler(CommandHandler("revisar", revisar))
+    app.add_handler(CommandHandler("tareas", tareas))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     if ALLOWED_USERS:
         # Lunes 08:00 UTC (~09:00-10:00 hora de España según horario de verano)
         app.job_queue.run_daily(digest_semanal, time=dt_time(hour=8, minute=0), days=(0,))
+        # Cada 20 min: la única forma de enterarte de un done/blocked sin preguntar tú
+        app.job_queue.run_repeating(sync_tasks, interval=20 * 60, first=60)
     else:
         log.warning("TELEGRAM_ALLOWED_USERS vacío: el digest semanal no tiene a quién enviarse")
     app.run_polling()

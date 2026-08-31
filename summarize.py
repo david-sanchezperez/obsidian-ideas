@@ -9,6 +9,8 @@ import httpx
 import trafilatura
 from pypdf import PdfReader
 
+from notes import ALLOWED_TAGS
+
 URL_RE = re.compile(r"https?://\S+")
 HASHTAG_RE = re.compile(r"#(\w[\w-]*)")
 X_HOSTS = {"x.com", "twitter.com", "www.x.com", "www.twitter.com"}
@@ -20,20 +22,6 @@ TAG_RE = re.compile(r"<[^>]+>")
 LITELLM_URL = os.environ.get("LITELLM_URL", "http://192.168.1.32:4000/v1/chat/completions")
 LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "sk-litellm-local")
 
-# Vocabulario cerrado de tags. Añadir aquí para ampliarlo — el LLM y los
-# hashtags manuales del mensaje solo pueden usar valores de esta lista.
-ALLOWED_TAGS = [
-    "agentes-ia",
-    "modelos-llm",
-    "infraestructura-local",
-    "seguridad-gobernanza",
-    "investigacion",
-    "arquitectura-multimodelo",
-    "second-brain",
-    "otros",
-    "todo",
-    "learning",
-]
 
 PROMPT = """Eres un asistente que resume noticias, artículos o ideas para un almacén \
 personal de ideas en Obsidian. Te doy un texto (o una idea suelta). Elige entre 1 y 3 \

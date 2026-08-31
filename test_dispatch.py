@@ -2,8 +2,8 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from dispatch import dispatch_task, retry_pending
-from notes import build_note, write_dispatch
+from dispatch import dispatch_task, retry_pending, sync_dispatch_statuses
+from notes import build_note, read_dispatch, write_dispatch
 
 REPOS = {"ctxlint": {"name": "ctxlint", "repo_url": "x", "repo_branch": "main"}}
 FIT = {"project_slug": "ctxlint", "task_title": "t", "task_body": "b"}
@@ -79,6 +79,56 @@ def test_dispatch_task_without_tenant_keeps_auto_decompose():
     assert payload["auto_decompose"] is True
 
 
+def _mock_status_client(status: str):
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.get.return_value = MagicMock(
+        json=lambda: {"id": "t1", "board_id": 1, "status": status},
+        raise_for_status=lambda: None,
+    )
+    return client
+
+
+def test_sync_reports_transition_to_terminal_status(tmp_path: Path):
+    note = tmp_path / "a.md"
+    note.write_text(build_note("T", "R", [], None), encoding="utf-8")
+    write_dispatch(note, "dispatched", FIT, {"id": "t1", "board_id": 1, "status": "running"})
+
+    with patch("dispatch.AGENT_LOOPS_URL", "http://x"), \
+         patch("dispatch.httpx.Client", return_value=_mock_status_client("done")):
+        changed = sync_dispatch_statuses(tmp_path)
+
+    assert len(changed) == 1
+    assert changed[0]["status"] == "done"
+    assert read_dispatch(note)["agent_loops_status"] == "done"
+
+
+def test_sync_ignores_unchanged_status(tmp_path: Path):
+    note = tmp_path / "a.md"
+    note.write_text(build_note("T", "R", [], None), encoding="utf-8")
+    write_dispatch(note, "dispatched", FIT, {"id": "t1", "board_id": 1, "status": "running"})
+
+    with patch("dispatch.AGENT_LOOPS_URL", "http://x"), \
+         patch("dispatch.httpx.Client", return_value=_mock_status_client("running")):
+        changed = sync_dispatch_statuses(tmp_path)
+
+    assert changed == []
+
+
+def test_sync_skips_notes_already_in_terminal_status(tmp_path: Path):
+    note = tmp_path / "a.md"
+    note.write_text(build_note("T", "R", [], None), encoding="utf-8")
+    write_dispatch(note, "dispatched", FIT, {"id": "t1", "board_id": 1, "status": "done"})
+
+    client = _mock_status_client("done")
+    with patch("dispatch.AGENT_LOOPS_URL", "http://x"), \
+         patch("dispatch.httpx.Client", return_value=client):
+        changed = sync_dispatch_statuses(tmp_path)
+
+    assert changed == []
+    client.get.assert_not_called()  # ya terminal, ni se consulta
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -90,4 +140,10 @@ if __name__ == "__main__":
         test_retry_pending_ignores_dispatched_and_no_fit(Path(d))
     test_dispatch_task_sets_tenant_and_skips_auto_decompose()
     test_dispatch_task_without_tenant_keeps_auto_decompose()
+    with tempfile.TemporaryDirectory() as d:
+        test_sync_reports_transition_to_terminal_status(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_sync_ignores_unchanged_status(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_sync_skips_notes_already_in_terminal_status(Path(d))
     print("OK")

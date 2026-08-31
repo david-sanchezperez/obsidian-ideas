@@ -60,9 +60,51 @@ def retry_pending(vault_dir: Path, repos: dict) -> tuple[int, int]:
             continue
         attempted += 1
         try:
-            dispatch_task(fit, repo_info)
-            write_dispatch(note, "dispatched", fit)
+            task = dispatch_task(fit, repo_info)
+            write_dispatch(note, "dispatched", fit, task)
             ok += 1
         except Exception:
             log.exception("reintento fallido para %s", note.name)
     return attempted, ok
+
+
+# Estados de agent-loops que ya no van a cambiar solos — dejar de hacer polling
+# sobre ellos y avisar una vez.
+TERMINAL_STATUSES = {"done", "archived", "gave_up", "blocked"}
+
+
+def sync_dispatch_statuses(vault_dir: Path) -> list[dict]:
+    """Consulta agent-loops por cada nota 'dispatched' con task_id conocido y
+    actualiza la nota si el estado cambió. Devuelve las notas cuyo estado
+    acaba de pasar a uno terminal (done/archived/gave_up/blocked) en esta
+    pasada, para poder avisar por Telegram solo de las novedades."""
+    if not AGENT_LOOPS_URL:
+        return []
+    changed: list[dict] = []
+    with httpx.Client(base_url=AGENT_LOOPS_URL, timeout=15) as client:
+        for note in vault_dir.glob("*.md"):
+            fit = read_dispatch(note)
+            if not fit or fit.get("status") != "dispatched" or not fit.get("task_id"):
+                continue
+            prev_status = fit.get("agent_loops_status")
+            if prev_status in TERMINAL_STATUSES:
+                continue  # ya se avisó, no sigue cambiando
+            try:
+                resp = client.get(f"/api/tasks/{fit['task_id']}")
+                resp.raise_for_status()
+                task = resp.json()
+            except Exception:
+                log.exception("no se pudo consultar el estado de la tarea %s", fit["task_id"])
+                continue
+            new_status = task.get("status")
+            if new_status == prev_status:
+                continue
+            write_dispatch(note, "dispatched", fit, task)
+            if new_status in TERMINAL_STATUSES:
+                changed.append({
+                    "note_name": note.name,
+                    "task_title": fit["task_title"],
+                    "project_slug": fit["project_slug"],
+                    "status": new_status,
+                })
+    return changed

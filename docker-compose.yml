@@ -14,3 +14,21 @@ services:
       - .env
     command: >
       sh -c "pip install -q --user -r requirements.txt && python bot.py"
+
+  dashboard:
+    image: python:3.12-slim
+    container_name: obsidian-ideas-dashboard
+    restart: unless-stopped
+    working_dir: /app
+    user: "${USER_UID:-1000}:${USER_GID:-1000}"
+    environment:
+      - HOME=/tmp
+    volumes:
+      - .:/app
+      - ${VAULT_HOST_PATH}:/app/vault
+    env_file:
+      - .env
+    ports:
+      - "${DASHBOARD_PORT:-8788}:${DASHBOARD_PORT:-8788}"
+    command: >
+      sh -c "pip install -q --user -r requirements.txt && python dashboard.py"
