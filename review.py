@@ -5,7 +5,10 @@ from pathlib import Path
 
 import httpx
 
-DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+# Vía LiteLLM (puerta única de modelos) en vez de la API de DeepSeek directa —
+# ver la misma nota en summarize.py.
+LITELLM_URL = os.environ.get("LITELLM_URL", "http://192.168.1.32:4000/v1/chat/completions")
+LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "sk-litellm-local")
 
 PROMPT = """Eres un asistente que ayuda a decidir qué hacer con ideas guardadas en un \
 vault personal de Obsidian. Te doy los proyectos activos del usuario y una lista de notas \
@@ -84,12 +87,11 @@ def format_notes(notes: list[str]) -> str:
 
 
 def review(notes: list[str], projects: str | None = None) -> str:
-    api_key = os.environ["DEEPSEEK_API_KEY"]
     resp = httpx.post(
-        DEEPSEEK_URL,
-        headers={"Authorization": f"Bearer {api_key}"},
+        LITELLM_URL,
+        headers={"Authorization": f"Bearer {LITELLM_API_KEY}"},
         json={
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "messages": [
                 {
                     "role": "user",
@@ -137,12 +139,11 @@ def evaluate_fit(note: str, repos: dict | None = None, infra: str | None = None)
     if not repos:
         return None
     projects_list = "\n".join(_format_project(slug, info) for slug, info in repos.items())
-    api_key = os.environ["DEEPSEEK_API_KEY"]
     resp = httpx.post(
-        DEEPSEEK_URL,
-        headers={"Authorization": f"Bearer {api_key}"},
+        LITELLM_URL,
+        headers={"Authorization": f"Bearer {LITELLM_API_KEY}"},
         json={
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "messages": [
                 {
                     "role": "user",

@@ -14,7 +14,11 @@ HASHTAG_RE = re.compile(r"#(\w[\w-]*)")
 X_HOSTS = {"x.com", "twitter.com", "www.x.com", "www.twitter.com"}
 TAG_RE = re.compile(r"<[^>]+>")
 
-DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+# Vía LiteLLM (puerta única de modelos, ver ~/litellm_config.yaml en la sobremesa)
+# en vez de la API de DeepSeek directa — así comparte caché y tope de gasto con
+# el resto de consumidores, y la key de DeepSeek solo vive en un sitio.
+LITELLM_URL = os.environ.get("LITELLM_URL", "http://192.168.1.32:4000/v1/chat/completions")
+LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "sk-litellm-local")
 
 # Vocabulario cerrado de tags. Añadir aquí para ampliarlo — el LLM y los
 # hashtags manuales del mensaje solo pueden usar valores de esta lista.
@@ -75,12 +79,11 @@ def fetch_url_bytes(url: str) -> bytes | None:
 
 
 def summarize(text: str) -> dict:
-    api_key = os.environ["DEEPSEEK_API_KEY"]
     resp = httpx.post(
-        DEEPSEEK_URL,
-        headers={"Authorization": f"Bearer {api_key}"},
+        LITELLM_URL,
+        headers={"Authorization": f"Bearer {LITELLM_API_KEY}"},
         json={
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "messages": [{
                 "role": "user",
                 "content": PROMPT.format(allowed_tags=", ".join(ALLOWED_TAGS), text=text[:8000]),
