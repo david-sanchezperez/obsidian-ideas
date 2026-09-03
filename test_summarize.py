@@ -3,7 +3,7 @@ import io
 
 from pypdf import PdfWriter
 
-from summarize import extract_manual_tags, process_pdf
+from summarize import extract_manual_tags, extract_urls, process_pdf
 
 
 def test_process_pdf_empty_text():
@@ -23,7 +23,14 @@ def test_extract_manual_tags():
     assert extract_manual_tags("#no-existe #learning") == ["learning"]
 
 
+def test_extract_urls():
+    msg = "mira esto https://a.com/x y también https://b.com/y https://a.com/x"
+    assert extract_urls(msg) == ["https://a.com/x", "https://b.com/y"]
+    assert extract_urls("sin enlaces aquí") == []
+
+
 if __name__ == "__main__":
     test_process_pdf_empty_text()
     test_extract_manual_tags()
+    test_extract_urls()
     print("OK")

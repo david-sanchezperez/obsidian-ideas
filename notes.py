@@ -133,12 +133,14 @@ def write_dispatch(path: Path, status: str, fit: dict, task: dict | None = None)
         payload["task_id"] = task.get("id")
         payload["board_id"] = task.get("board_id")
         payload["agent_loops_status"] = task.get("status")
+        if task.get("pr_url"):
+            payload["pr_url"] = task["pr_url"]
     else:
         # preserva task_id/board_id ya conocidos si solo se actualiza el status
         # (p.ej. el sync periódico marcando done/blocked sobre un dispatch previo)
         prev = read_dispatch(path)
         if prev:
-            for k in ("task_id", "board_id", "agent_loops_status"):
+            for k in ("task_id", "board_id", "agent_loops_status", "pr_url"):
                 if k in prev:
                     payload[k] = prev[k]
     text += f"\n<!-- dispatch: {json.dumps(payload, ensure_ascii=False)} -->\n"

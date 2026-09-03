@@ -180,14 +180,34 @@ async def tareas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not fit or fit.get("status") != "dispatched" or not fit.get("task_id"):
             continue
         label = STATUS_LABELS.get(fit.get("agent_loops_status"), fit.get("agent_loops_status", "?"))
-        lines.append(f"• {fit['task_title']} ({fit['project_slug']}) — {label}")
+        line = f"• {fit['task_title']} ({fit['project_slug']}) — {label}"
+        if fit.get("pr_url"):
+            line += f"\n  🔀 {fit['pr_url']}"
+        lines.append(line)
     await update.message.reply_text("\n".join(lines) if lines else "No hay ninguna idea trabajándose ahora mismo.")
 
 
+async def reintentar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        return
+    pending = [n for n in VAULT_DIR.glob("*.md") if (read_dispatch(n) or {}).get("status") == "pending"]
+    if not pending:
+        await update.message.reply_text("No hay ninguna idea pendiente de encolar.")
+        return
+    await update.message.reply_text(f"Reintentando {len(pending)} idea(s) pendiente(s)...")
+    attempted, ok = retry_pending(VAULT_DIR, load_repos())
+    await update.message.reply_text(f"Encoladas {ok}/{attempted}.")
+
+
 async def sync_tasks(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Job periódico: si alguna tarea despachada llegó a un estado terminal
-    (done/archived/blocked/gave_up), avisa por Telegram — es el único punto
-    en que te enteras sin tener que preguntar tú con /tareas."""
+    """Job periódico: reintenta notas 'pending' (ya no hace falta esperar al
+    digest del lunes) y avisa por Telegram si alguna tarea despachada llegó a
+    un estado terminal o se le abrió PR — el único punto en que te enteras
+    sin tener que preguntar tú con /tareas."""
+    try:
+        retry_pending(VAULT_DIR, load_repos())
+    except Exception:
+        log.exception("Error reintentando pendientes en el sync periódico")
     try:
         changed = sync_dispatch_statuses(VAULT_DIR)
     except Exception:
@@ -196,8 +216,11 @@ async def sync_tasks(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not changed:
         return
     for item in changed:
-        label = STATUS_LABELS.get(item["status"], item["status"])
-        text = f"{label}\n{item['task_title']} ({item['project_slug']})"
+        if item["status"] == "pr_opened":
+            text = f"🔀 PR abierto\n{item['task_title']} ({item['project_slug']})\n{item['pr_url']}"
+        else:
+            label = STATUS_LABELS.get(item["status"], item["status"])
+            text = f"{label}\n{item['task_title']} ({item['project_slug']})"
         for user_id in ALLOWED_USERS:
             try:
                 await context.bot.send_message(chat_id=user_id, text=text)
@@ -206,18 +229,10 @@ async def sync_tasks(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def digest_semanal(context: ContextTypes.DEFAULT_TYPE) -> None:
-    attempted = ok = 0
-    try:
-        attempted, ok = retry_pending(VAULT_DIR, load_repos())
-    except Exception:
-        log.exception("Error reintentando tareas pendientes")
+    # El reintento de 'pending' ya lo hace sync_tasks cada 20 min — aquí solo
+    # queda el resumen semanal de notas.
     for user_id in ALLOWED_USERS:
         try:
-            if ok:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"🤖 Encoladas {ok}/{attempted} tareas pendientes que no se pudieron lanzar antes.",
-                )
             await _send_review(context.bot, user_id)
         except Exception:
             log.exception("Error en el digest semanal para %s", user_id)
@@ -230,6 +245,7 @@ def main() -> None:
     app.add_handler(CommandHandler("tag", tag))
     app.add_handler(CommandHandler("revisar", revisar))
     app.add_handler(CommandHandler("tareas", tareas))
+    app.add_handler(CommandHandler("reintentar", reintentar))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     if ALLOWED_USERS:

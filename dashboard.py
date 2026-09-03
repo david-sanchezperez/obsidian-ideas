@@ -1,6 +1,7 @@
-"""Panel web de solo lectura para el vault: ver qué se ha guardado, con qué
-tags y qué pasó con cada idea despachada a agent-loops. Sin dependencias
-nuevas (http.server, como idea-pr-opener) — es una vista, no una app.
+"""Panel web para el vault: ver qué se ha guardado, con qué tags, qué pasó con
+cada idea despachada a agent-loops (cola, PR) — y forzar el reintento de una
+idea 'pending'. http.server, como idea-pr-opener — sin dependencias nuevas
+más allá de las que ya trae el resto del bot (httpx, vía dispatch.py).
 """
 import os
 from datetime import datetime
@@ -8,7 +9,9 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from notes import ALLOWED_TAGS, VAULT_DIR, parse_note
+from dispatch import retry_one
+from notes import ALLOWED_TAGS, VAULT_DIR, parse_note, read_dispatch
+from review import load_repos
 
 PORT = int(os.environ.get("DASHBOARD_PORT", "8788"))
 AGENT_LOOPS_URL = os.environ.get("AGENT_LOOPS_URL", "")
@@ -25,6 +28,9 @@ STATUS_BADGES = {
     "archived": ("✅ terminada", "#3c763d"),
     "gave_up": ("❌ abandonada", "#a94442"),
 }
+
+# Estados "en curso" (ni pending sin encolar, ni terminales) para el resumen.
+QUEUE_STATUSES = ("dispatched", "triage", "todo", "ready", "running", "blocked")
 
 PAGE = """<!doctype html>
 <html lang="es">
@@ -67,42 +73,75 @@ def _badge(status: str | None) -> str:
     return f'<span class="badge" style="background:{color}">{escape(label)}</span>'
 
 
+def _links(dispatch: dict) -> str:
+    links = ""
+    if dispatch.get("task_id") and AGENT_LOOPS_URL:
+        links += f' · <a href="{escape(AGENT_LOOPS_URL)}/dashboard" target="_blank">ver en agent-loops ↗</a>'
+    if dispatch.get("pr_url"):
+        links += f' · <a href="{escape(dispatch["pr_url"])}" target="_blank">🔀 PR ↗</a>'
+    if dispatch.get("status") == "pending":
+        links += f' · <a href="/retry/{escape(dispatch.get("_filename", ""))}">🔁 reintentar ahora</a>'
+    return links
+
+
 def _card(note: dict) -> str:
-    dispatch = note["dispatch"] or {}
+    dispatch = dict(note["dispatch"] or {})
+    dispatch["_filename"] = note["filename"]
     status = dispatch.get("agent_loops_status") or dispatch.get("status")
     excerpt = note["body"][:220] + ("…" if len(note["body"]) > 220 else "")
     tags_html = "".join(
         f'<a href="/?tag={escape(t)}">#{escape(t)}</a>' for t in note["tags"]
     )
-    task_link = ""
-    if dispatch.get("task_id") and AGENT_LOOPS_URL:
-        task_link = f' · <a href="{escape(AGENT_LOOPS_URL)}/dashboard" target="_blank">ver en agent-loops ↗</a>'
     return f"""<div class="card">
   <h2><a href="/note/{escape(note['filename'])}">{escape(note['title'])}</a>{_badge(status)}</h2>
-  <div class="meta">{escape(note['date'])}{task_link}</div>
+  <div class="meta">{escape(note['date'])}{_links(dispatch)}</div>
   <div>{escape(excerpt)}</div>
   <div class="tags">{tags_html}</div>
 </div>"""
 
 
-def _list_page(tag: str | None, q: str | None) -> str:
+def _status_of(note: dict) -> str | None:
+    dispatch = note["dispatch"] or {}
+    return dispatch.get("agent_loops_status") or dispatch.get("status")
+
+
+def _summary_bar(notes: list[dict], status: str | None) -> str:
+    counts: dict[str, int] = {}
+    for n in notes:
+        s = _status_of(n)
+        if s:
+            counts[s] = counts.get(s, 0) + 1
+    if not counts:
+        return ""
+    parts = []
+    for s, count in sorted(counts.items(), key=lambda kv: -kv[1]):
+        label = STATUS_BADGES.get(s, (s, "#8888"))[0]
+        cls = "active" if s == status else ""
+        parts.append(f'<a href="/?status={escape(s)}" class="{cls}">{escape(label)} · {count}</a>')
+    return '<div class="toolbar">' + "".join(parts) + "</div>"
+
+
+def _list_page(tag: str | None, q: str | None, status: str | None) -> str:
     notes = [parse_note(p) for p in sorted(VAULT_DIR.glob("*.md"), reverse=True)]
+    summary = _summary_bar(notes, status)
     if tag:
         notes = [n for n in notes if tag in n["tags"]]
+    if status:
+        notes = [n for n in notes if _status_of(n) == status]
     if q:
         ql = q.lower()
         notes = [n for n in notes if ql in n["title"].lower() or ql in n["body"].lower()]
 
     all_tags = sorted({t for n in notes for t in n["tags"]} | set(ALLOWED_TAGS))
     toolbar = ['<div class="toolbar">']
-    toolbar.append(f'<a href="/" class="{"active" if not tag else ""}">todas</a>')
+    toolbar.append(f'<a href="/" class="{"active" if not tag and not status else ""}">todas</a>')
     for t in all_tags:
         cls = "active" if t == tag else ""
         toolbar.append(f'<a href="/?tag={escape(t)}" class="{cls}">#{escape(t)}</a>')
     toolbar.append("</div>")
 
     cards = "".join(_card(n) for n in notes) or '<div class="empty">Sin notas con este filtro.</div>'
-    return "".join(toolbar) + f'<div class="meta">{len(notes)} nota(s)</div>' + cards
+    return summary + "".join(toolbar) + f'<div class="meta">{len(notes)} nota(s)</div>' + cards
 
 
 def _note_page(filename: str) -> str | None:
@@ -110,16 +149,14 @@ def _note_page(filename: str) -> str | None:
     if path.parent != VAULT_DIR.resolve() or not path.exists():
         return None
     note = parse_note(path)
-    dispatch = note["dispatch"] or {}
+    dispatch = dict(note["dispatch"] or {})
+    dispatch["_filename"] = note["filename"]
     status = dispatch.get("agent_loops_status") or dispatch.get("status")
     source = f'<p>🔗 <a href="{escape(note["source"])}">{escape(note["source"])}</a></p>' if note["source"] else ""
     task_info = ""
-    if dispatch:
+    if note["dispatch"]:
         task_info = f"""<p><strong>Despacho:</strong> {_badge(status)}
-          proyecto: {escape(dispatch.get('project_slug', '?'))}"""
-        if dispatch.get("task_id") and AGENT_LOOPS_URL:
-            task_info += f' · <a href="{escape(AGENT_LOOPS_URL)}/dashboard" target="_blank">ver en agent-loops ↗</a>'
-        task_info += "</p>"
+          proyecto: {escape(dispatch.get('project_slug', '?'))}{_links(dispatch)}</p>"""
     tags_html = " ".join(f"#{escape(t)}" for t in note["tags"])
     return (
         '<a class="backlink" href="/">← volver</a>'
@@ -144,7 +181,7 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         qs = parse_qs(url.query)
         if url.path == "/":
-            content = _list_page(qs.get("tag", [None])[0], qs.get("q", [None])[0])
+            content = _list_page(qs.get("tag", [None])[0], qs.get("q", [None])[0], qs.get("status", [None])[0])
             self._send_html(content)
         elif url.path.startswith("/note/"):
             filename = url.path.removeprefix("/note/")
@@ -153,6 +190,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_html('<div class="empty">Nota no encontrada.</div>', 404)
             else:
                 self._send_html(content)
+        elif url.path.startswith("/retry/"):
+            filename = url.path.removeprefix("/retry/")
+            path = (VAULT_DIR / filename).resolve()
+            if path.parent == VAULT_DIR.resolve() and path.exists():
+                retry_one(path, load_repos())
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
         else:
             self._send_html('<div class="empty">404.</div>', 404)
 

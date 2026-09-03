@@ -5,6 +5,8 @@ from pathlib import Path
 
 import httpx
 
+from llm_json import parse_json_content
+
 # Vía LiteLLM (puerta única de modelos) en vez de la API de DeepSeek directa —
 # ver la misma nota en summarize.py.
 LITELLM_URL = os.environ.get("LITELLM_URL", "http://192.168.1.32:4000/v1/chat/completions")
@@ -157,7 +159,7 @@ def evaluate_fit(note: str, repos: dict | None = None, infra: str | None = None)
         timeout=60,
     )
     resp.raise_for_status()
-    result = json.loads(resp.json()["choices"][0]["message"]["content"])
+    result = parse_json_content(resp.json()["choices"][0]["message"]["content"])
     if not result.get("matches") or result.get("project_slug") not in repos:
         return None
     return result

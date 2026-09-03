@@ -2,7 +2,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from dispatch import dispatch_task, retry_pending, sync_dispatch_statuses
+from dispatch import dispatch_task, retry_one, retry_pending, sync_dispatch_statuses
 from notes import build_note, read_dispatch, write_dispatch
 
 REPOS = {"ctxlint": {"name": "ctxlint", "repo_url": "x", "repo_branch": "main"}}
@@ -115,10 +115,10 @@ def test_sync_ignores_unchanged_status(tmp_path: Path):
     assert changed == []
 
 
-def test_sync_skips_notes_already_in_terminal_status(tmp_path: Path):
+def test_sync_skips_terminal_notes_once_pr_url_known(tmp_path: Path):
     note = tmp_path / "a.md"
     note.write_text(build_note("T", "R", [], None), encoding="utf-8")
-    write_dispatch(note, "dispatched", FIT, {"id": "t1", "board_id": 1, "status": "done"})
+    write_dispatch(note, "dispatched", FIT, {"id": "t1", "board_id": 1, "status": "done", "pr_url": "https://x/pull/1"})
 
     client = _mock_status_client("done")
     with patch("dispatch.AGENT_LOOPS_URL", "http://x"), \
@@ -126,7 +126,51 @@ def test_sync_skips_notes_already_in_terminal_status(tmp_path: Path):
         changed = sync_dispatch_statuses(tmp_path)
 
     assert changed == []
-    client.get.assert_not_called()  # ya terminal, ni se consulta
+    client.get.assert_not_called()  # ya terminal y con PR conocido, ni se consulta
+
+
+def test_sync_keeps_polling_terminal_note_without_pr_url_yet(tmp_path: Path):
+    note = tmp_path / "a.md"
+    note.write_text(build_note("T", "R", [], None), encoding="utf-8")
+    write_dispatch(note, "dispatched", FIT, {"id": "t1", "board_id": 1, "status": "done"})
+
+    client = _mock_status_client("done")  # aún sin pr_url en agent-loops
+    with patch("dispatch.AGENT_LOOPS_URL", "http://x"), \
+         patch("dispatch.httpx.Client", return_value=client):
+        changed = sync_dispatch_statuses(tmp_path)
+
+    assert changed == []
+    client.get.assert_called_once()  # sigue consultando a la espera del PR
+
+
+def test_sync_reports_pr_url_once_it_appears(tmp_path: Path):
+    note = tmp_path / "a.md"
+    note.write_text(build_note("T", "R", [], None), encoding="utf-8")
+    write_dispatch(note, "dispatched", FIT, {"id": "t1", "board_id": 1, "status": "done"})
+
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.get.return_value = MagicMock(
+        json=lambda: {"id": "t1", "board_id": 1, "status": "done", "pr_url": "https://x/pull/1"},
+        raise_for_status=lambda: None,
+    )
+    with patch("dispatch.AGENT_LOOPS_URL", "http://x"), \
+         patch("dispatch.httpx.Client", return_value=client):
+        changed = sync_dispatch_statuses(tmp_path)
+
+    assert len(changed) == 1
+    assert changed[0]["status"] == "pr_opened"
+    assert changed[0]["pr_url"] == "https://x/pull/1"
+    assert read_dispatch(note)["pr_url"] == "https://x/pull/1"
+
+
+def test_retry_one_only_retries_pending(tmp_path: Path):
+    note = tmp_path / "a.md"
+    note.write_text(build_note("T", "R", [], None), encoding="utf-8")
+    write_dispatch(note, "dispatched", FIT)
+    with patch("dispatch.dispatch_task") as mock_dispatch:
+        assert retry_one(note, REPOS) is False
+    mock_dispatch.assert_not_called()
 
 
 if __name__ == "__main__":
@@ -145,5 +189,11 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as d:
         test_sync_ignores_unchanged_status(Path(d))
     with tempfile.TemporaryDirectory() as d:
-        test_sync_skips_notes_already_in_terminal_status(Path(d))
+        test_sync_skips_terminal_notes_once_pr_url_known(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_sync_keeps_polling_terminal_note_without_pr_url_yet(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_sync_reports_pr_url_once_it_appears(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_retry_one_only_retries_pending(Path(d))
     print("OK")

@@ -1,6 +1,5 @@
 """Extracción de contenido de URLs y resumen vía DeepSeek."""
 import io
-import json
 import os
 import re
 from urllib.parse import urlparse
@@ -9,6 +8,7 @@ import httpx
 import trafilatura
 from pypdf import PdfReader
 
+from llm_json import parse_json_content
 from notes import ALLOWED_TAGS
 
 URL_RE = re.compile(r"https?://\S+")
@@ -42,9 +42,21 @@ def extract_manual_tags(message: str) -> list[str]:
     return [t for t in ALLOWED_TAGS if t in found]
 
 
-def extract_url(message: str) -> str | None:
-    match = URL_RE.search(message)
-    return match.group(0) if match else None
+def extract_urls(message: str) -> list[str]:
+    """Todas las URLs del mensaje, en orden y sin duplicados."""
+    return list(dict.fromkeys(URL_RE.findall(message)))
+
+
+def fetch_link_content(url: str) -> str | None:
+    """Contenido en texto de un enlace: tuit, PDF o artículo web."""
+    if urlparse(url).netloc in X_HOSTS:
+        return fetch_tweet_text(url)
+    data = fetch_url_bytes(url)
+    if not data:
+        return None
+    if data[:4] == b"%PDF":
+        return extract_pdf_text(data)
+    return trafilatura.extract(data.decode("utf-8", "ignore"))
 
 
 def fetch_tweet_text(url: str) -> str | None:
@@ -82,7 +94,7 @@ def summarize(text: str) -> dict:
     )
     resp.raise_for_status()
     content = resp.json()["choices"][0]["message"]["content"]
-    result = json.loads(content)
+    result = parse_json_content(content)
     result["tags"] = [t for t in result.get("tags", []) if t in ALLOWED_TAGS]
     return result
 
@@ -108,34 +120,30 @@ def process_pdf(data: bytes, filename: str) -> dict:
 
 
 def process_message(message: str) -> dict:
-    """Devuelve {"title", "summary", "tags", "source_url"} listo para guardar."""
+    """Devuelve {"title", "summary", "tags", "source_url"} listo para guardar.
+
+    Si el mensaje trae varios enlaces (p.ej. una noticia que cita varias fuentes),
+    se descarga el contenido de todos y se resume en conjunto.
+    """
     manual_tags = extract_manual_tags(message)
-    url = extract_url(message)
-    if not url:
+    urls = extract_urls(message)
+    if not urls:
         result = summarize(message)
         result["source_url"] = None
         result["tags"] = list(dict.fromkeys(result["tags"] + manual_tags))
         return result
 
-    if urlparse(url).netloc in X_HOSTS:
-        content = fetch_tweet_text(url)
-    else:
-        data = fetch_url_bytes(url)
-        if data and data[:4] == b"%PDF":
-            result = process_pdf(data, url.rstrip("/").rsplit("/", 1)[-1] or "documento.pdf")
-            result["source_url"] = url
-            result["tags"] = list(dict.fromkeys(result["tags"] + manual_tags))
-            return result
-        content = trafilatura.extract(data.decode("utf-8", "ignore")) if data else None
+    contents = [(u, fetch_link_content(u)) for u in urls]
+    text = "\n\n".join(f"[{u}]\n{c}" for u, c in contents if c)
 
-    if not content:
+    if not text:
         return {
-            "title": url,
+            "title": urls[0],
             "summary": "No se pudo extraer el contenido de este enlace automáticamente.",
             "tags": manual_tags,
-            "source_url": url,
+            "source_url": urls[0],
         }
-    result = summarize(content)
-    result["source_url"] = url
+    result = summarize(text)
+    result["source_url"] = urls[0]
     result["tags"] = list(dict.fromkeys(result["tags"] + manual_tags))
     return result

@@ -47,25 +47,29 @@ def dispatch_task(fit: dict, repo_info: dict) -> dict:
         return resp.json()
 
 
+def retry_one(note: Path, repos: dict) -> bool:
+    """Reintenta el encolado de una única nota 'pending'. True si quedó encolada."""
+    fit = read_dispatch(note)
+    if not fit or fit.get("status") != "pending":
+        return False
+    repo_info = repos.get(fit.get("project_slug"))
+    if not repo_info:
+        return False
+    try:
+        task = dispatch_task(fit, repo_info)
+        write_dispatch(note, "dispatched", fit, task)
+        return True
+    except Exception:
+        log.exception("reintento fallido para %s", note.name)
+        return False
+
+
 def retry_pending(vault_dir: Path, repos: dict) -> tuple[int, int]:
-    """Reintenta el encolado de notas marcadas 'pending' (fallaron por PC apagado, etc.).
-    Devuelve (intentadas, encoladas_con_éxito)."""
-    attempted = ok = 0
-    for note in vault_dir.glob("*.md"):
-        fit = read_dispatch(note)
-        if not fit or fit.get("status") != "pending":
-            continue
-        repo_info = repos.get(fit.get("project_slug"))
-        if not repo_info:
-            continue
-        attempted += 1
-        try:
-            task = dispatch_task(fit, repo_info)
-            write_dispatch(note, "dispatched", fit, task)
-            ok += 1
-        except Exception:
-            log.exception("reintento fallido para %s", note.name)
-    return attempted, ok
+    """Reintenta el encolado de todas las notas marcadas 'pending' (fallaron por
+    PC apagado, etc.). Devuelve (intentadas, encoladas_con_éxito)."""
+    pending = [n for n in vault_dir.glob("*.md") if (read_dispatch(n) or {}).get("status") == "pending"]
+    ok = sum(retry_one(n, repos) for n in pending)
+    return len(pending), ok
 
 
 # Estados de agent-loops que ya no van a cambiar solos — dejar de hacer polling
@@ -87,8 +91,11 @@ def sync_dispatch_statuses(vault_dir: Path) -> list[dict]:
             if not fit or fit.get("status") != "dispatched" or not fit.get("task_id"):
                 continue
             prev_status = fit.get("agent_loops_status")
-            if prev_status in TERMINAL_STATUSES:
-                continue  # ya se avisó, no sigue cambiando
+            # Una vez en estado terminal ya no cambia de estado, pero el PR puede
+            # abrirse unos instantes después (webhook de idea-pr-opener) — seguimos
+            # consultando hasta que aparezca pr_url, luego sí paramos.
+            if prev_status in TERMINAL_STATUSES and fit.get("pr_url"):
+                continue
             try:
                 resp = client.get(f"/api/tasks/{fit['task_id']}")
                 resp.raise_for_status()
@@ -97,14 +104,23 @@ def sync_dispatch_statuses(vault_dir: Path) -> list[dict]:
                 log.exception("no se pudo consultar el estado de la tarea %s", fit["task_id"])
                 continue
             new_status = task.get("status")
-            if new_status == prev_status:
+            new_pr_url = task.get("pr_url") and not fit.get("pr_url")
+            if new_status == prev_status and not new_pr_url:
                 continue
             write_dispatch(note, "dispatched", fit, task)
-            if new_status in TERMINAL_STATUSES:
+            if new_status in TERMINAL_STATUSES and new_status != prev_status:
                 changed.append({
                     "note_name": note.name,
                     "task_title": fit["task_title"],
                     "project_slug": fit["project_slug"],
                     "status": new_status,
+                })
+            if new_pr_url:
+                changed.append({
+                    "note_name": note.name,
+                    "task_title": fit["task_title"],
+                    "project_slug": fit["project_slug"],
+                    "status": "pr_opened",
+                    "pr_url": task["pr_url"],
                 })
     return changed
